@@ -1,0 +1,17 @@
+[Unit]
+Description=kp-vote: Kinopoisk ratings for Lampa
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/kp-vote/kp-vote.py
+Environment=PORT=9121
+DynamicUser=yes
+StateDirectory=kp-vote
+StateDirectoryMode=0700
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
