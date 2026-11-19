@@ -1,0 +1,9 @@
+# Official Lampac NextGen image + tools for the LampacApk module (/lampac.apk)
+FROM ghcr.io/lampac-nextgen/lampac:latest
+USER root
+# deb.debian.org is very slow from here; use the Belarus mirror for the main repo
+RUN sed -i 's#http://deb.debian.org/debian #http://ftp.by.debian.org/debian #; s#URIs: http://deb.debian.org/debian$#URIs: http://ftp.by.debian.org/debian#' /etc/apt/sources.list.d/debian.sources 2>/dev/null; sed -i 's#deb.debian.org/debian #ftp.by.debian.org/debian #' /etc/apt/sources.list 2>/dev/null; true
+# slim image has no man dirs; openjdk post-install needs them
+RUN mkdir -p /usr/share/man/man1
+RUN apt-get update && apt-get install -y --no-install-recommends default-jdk-headless apksigner zipalign && rm -rf /var/lib/apt/lists/*
+USER lampac
