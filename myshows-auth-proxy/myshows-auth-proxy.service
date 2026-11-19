@@ -1,0 +1,15 @@
+[Unit]
+Description=MyShows auth proxy for Lampa (replaces myshows.igorek1986.ru)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/lampac/myshows-auth-proxy.py
+Environment=PORT=9120
+DynamicUser=yes
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
