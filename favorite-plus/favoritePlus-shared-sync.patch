@@ -1,0 +1,353 @@
+--- a/favoritePlus.js
++++ b/favoritePlus.js
+@@ -3,7 +3,7 @@
+ 
+   const manifest = {
+     type: 'other',
+-    version: '5.2.10',
++    version: '5.2.10-msbbol.2',
+     name: 'Favorite Plus',
+     component: 'favorite_plus'
+   };
+@@ -132,15 +132,135 @@
+   };
+ 
+   // SYNC
++  // msbbol: Favorite Plus lists are stored per Lampac account and shared by all profiles.js profiles,
++  // so several devices/people may edit them. The original exported the whole local file and imported
++  // only at app start: a device opened earlier overwrote other devices' changes. Here every export is a
++  // three-way merge: base (last server state this device saw) -> local changes are applied on top of the
++  // current server state. Changes from other devices are pulled on lws "storage" events, on resume and
++  // when the bookmarks page opens.
++  const PLUS_BASE_KEY = 'favorite_plus_base';
++
++  const plusMerge = {
++    clone(obj) {
++      return JSON.parse(JSON.stringify(obj || {}));
++    },
++
++    normalize(fav) {
++      const out = this.clone(fav);
++      out.plusTypes = out.plusTypes || {};
++      out.plusTypes.card = out.plusTypes.card || [];
++      return out;
++    },
++
++    // uid -> name for user lists ('card' holds the card objects)
++    types(fav) {
++      const map = {};
++      Object.keys(fav.plusTypes || {}).forEach((name) => {
++        if (name !== 'card') map[fav.plusTypes[name]] = name;
++      });
++      return map;
++    },
++
++    list(base, local, remote) {
++      const inBase = new Set((base || []).map(String));
++      const inLocal = new Set((local || []).map(String));
++      const removed = new Set((base || []).filter((id) => !inLocal.has(String(id))).map(String));
++      const result = (remote || []).filter((id) => !removed.has(String(id)));
++      const inResult = new Set(result.map(String));
++      const added = (local || []).filter((id) => !inBase.has(String(id)) && !inResult.has(String(id)));
++      return added.concat(result);
++    },
++
++    merge(base, local, remote) {
++      base = this.normalize(base);
++      local = this.normalize(local);
++      const out = this.normalize(remote);
++
++      const B = this.types(base);
++      const L = this.types(local);
++      const R = this.types(out);
++
++      Object.keys(B).forEach((uid) => {
++        if (!(uid in L)) {
++          // deleted on this device
++          if (uid in R) {
++            delete out.plusTypes[R[uid]];
++            delete out[uid];
++            delete R[uid];
++          }
++          return;
++        }
++
++        if (!(uid in R)) return; // deleted on another device: stays deleted
++
++        if (L[uid] !== B[uid] && !(L[uid] in out.plusTypes)) {
++          // renamed on this device
++          delete out.plusTypes[R[uid]];
++          out.plusTypes[L[uid]] = uid;
++          R[uid] = L[uid];
++        }
++
++        out[uid] = this.list(base[uid], local[uid], out[uid]);
++      });
++
++      Object.keys(L).forEach((uid) => {
++        if (uid in B) return;
++
++        if (uid in R) {
++          out[uid] = this.list([], local[uid], out[uid]);
++          return;
++        }
++
++        const name = L[uid];
++        if (name in out.plusTypes) {
++          // a list with the same name was created on another device: join them
++          const ruid = out.plusTypes[name];
++          out[ruid] = this.list([], local[uid], out[ruid]);
++          return;
++        }
++
++        out.plusTypes[name] = uid;
++        out[uid] = (local[uid] || []).slice();
++      });
++
++      // card objects: this device's order first, then the ones only the server has
++      const seen = new Set();
++      const cards = [];
++      local.plusTypes.card.concat(out.plusTypes.card).forEach((card) => {
++        if (!card || card.id === undefined || seen.has(String(card.id))) return;
++        seen.add(String(card.id));
++        cards.push(card);
++      });
++
++      const referenced = new Set();
++      Object.keys(this.types(out)).forEach((uid) => {
++        (out[uid] || []).forEach((id) => referenced.add(String(id)));
++      });
++
++      out.plusTypes.card = cards.filter((card) => referenced.has(String(card.id)));
++      return out;
++    },
++
++    same(a, b) {
++      return JSON.stringify(a) === JSON.stringify(b);
++    }
++  };
++
+   const plusSync = {
++    busy: false,
++    pending: false,
++    timer: null,
++    lastImport: 0,
++
+     init() {
+       if (window.favorite_plus_sync) return;
+       window.favorite_plus_sync = true;
+       this.goImport(() => {
+         Lampa.Storage.listener.follow('change', (event) => {
+-          if (event.name === STORAGE_KEY) this.goExport();
++          if (event.name === STORAGE_KEY) this.scheduleExport();
+         });
+       });
++      this.listenRemote();
+     },
+ 
+     account(url) {
+@@ -158,58 +278,151 @@
+       return url;
+     },
+ 
+-    goExport() {
+-      if (window.sync_disable) return;
+-      const value = Lampa.Storage.get(STORAGE_KEY, {});
+-      if (!value.hasOwnProperty('plusTypes')) return;
+-      const uri = this.account(
+-        window.location.origin +
+-        '/storage/set?path=sync_favorite_plus'
+-      );
++    // -> { data, changeTime }, data == null when the server has no file yet
++    fetchRemote() {
++      return fetch(this.account(window.location.origin + '/storage/get?path=sync_favorite_plus'), { cache: 'no-store' })
++        .then((res) => res.json())
++        .then((j) => {
++          if (j.success && j.fileInfo && j.data) {
++            const data = JSON.parse(j.data);
++            if (!data.hasOwnProperty('plusTypes')) throw new Error('bad data');
++            return { data, changeTime: j.fileInfo.changeTime };
++          }
++          if (j.msg === 'outFile') return { data: null, changeTime: 0 };
++          throw new Error('storage get failed');
++        });
++    },
+ 
+-      fetch(uri, {
++    put(value) {
++      return fetch(this.account(window.location.origin + '/storage/set?path=sync_favorite_plus'), {
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify(value)
+       })
+         .then((res) => res.json())
+         .then((j) => {
+-          if (j.success && j.fileInfo) {
+-            Lampa.Storage.set(STORAGE_SYNC_KEY, j.fileInfo.changeTime);
+-          }
++          if (!j.success || !j.fileInfo) throw new Error('storage set failed');
++          return j.fileInfo.changeTime;
++        });
++    },
++
++    // write without triggering our own export, and show it
++    applyLocal(value) {
++      const before = Lampa.Storage.get(STORAGE_KEY, {});
++      Lampa.Storage.set(STORAGE_KEY, value, true);
++      favoritePlus.init(value);
++      if (!plusMerge.same(before, value)) plusReorder.refresh();
++    },
++
++    scheduleExport() {
++      clearTimeout(this.timer);
++      this.timer = setTimeout(() => this.goExport(), 300);
++    },
++
++    goExport() {
++      if (window.sync_disable) return;
++      if (this.busy) {
++        this.pending = true;
++        return;
++      }
++
++      const snapshot = Lampa.Storage.get(STORAGE_KEY, {});
++      if (!snapshot.hasOwnProperty('plusTypes')) return;
++
++      this.busy = true;
++      const base = Lampa.Storage.get(PLUS_BASE_KEY, '');
++
++      this.fetchRemote()
++        .then((remote) => {
++          const merged = remote.data
++            ? plusMerge.merge(base && base.plusTypes ? base : {}, snapshot, remote.data)
++            : plusMerge.normalize(snapshot);
++
++          return this.put(merged).then((changeTime) => {
++            Lampa.Storage.set(PLUS_BASE_KEY, merged, true);
++            Lampa.Storage.set(STORAGE_SYNC_KEY, changeTime, true);
++            // edits made during the round trip are re-applied on top of the merged state
++            const current = Lampa.Storage.get(STORAGE_KEY, {});
++            this.applyLocal(plusMerge.merge(snapshot, current, merged));
++          });
+         })
+-        .catch(() => console.log('Lampac Storage', 'export', 'error'));
++        .catch((e) => console.log('Lampac Storage', 'export', 'error', e && e.message))
++        .then(() => {
++          this.busy = false;
++          if (this.pending) {
++            this.pending = false;
++            this.goExport();
++          }
++        });
+     },
+ 
+     goImport(callback) {
+-      if (window.sync_disable) return;
+-      const network = new Lampa.Reguest();
+-      network.silent(
+-        this.account(
+-          window.location.origin +
+-          '/storage/get?path=sync_favorite_plus'
+-        ),
+-        (j) => {
+-          if (j.success && j.fileInfo && j.data) {
+-            if (j.fileInfo.changeTime > Lampa.Storage.get(STORAGE_SYNC_KEY, 0)) {
+-              try {
+-                const data = JSON.parse(j.data);
+-                if (data.hasOwnProperty('plusTypes')) {
+-                  Lampa.Storage.set(STORAGE_KEY, data, true);
+-                  Lampa.Storage.set(STORAGE_SYNC_KEY, j.fileInfo.changeTime);
+-                  favoritePlus.init(data);
+-                }
+-              } catch (e) {
+-                console.log('Lampac Storage', 'import', e.message);
+-              }
+-            }
+-          } else if (j.msg && j.msg === 'outFile') {
++      if (window.sync_disable) {
++        if (typeof callback === 'function') callback();
++        return;
++      }
++
++      this.lastImport = Date.now();
++
++      this.fetchRemote()
++        .then((remote) => {
++          if (!remote.data) {
+             favoritePlus.init();
+             this.goExport();
++            return;
+           }
++
++          const base = Lampa.Storage.get(PLUS_BASE_KEY, '');
++          const hasBase = base && base.plusTypes;
++          if (hasBase && remote.changeTime <= Lampa.Storage.get(STORAGE_SYNC_KEY, 0)) return;
++          if (this.busy) return; // the running export merges with the server itself
++
++          const local = Lampa.Storage.get(STORAGE_KEY, {});
++          const merged = local.hasOwnProperty('plusTypes')
++            ? plusMerge.merge(hasBase ? base : {}, local, remote.data)
++            : plusMerge.normalize(remote.data);
++
++          Lampa.Storage.set(PLUS_BASE_KEY, remote.data, true);
++          Lampa.Storage.set(STORAGE_SYNC_KEY, remote.changeTime, true);
++          this.applyLocal(merged);
++
++          // this device had changes the server has not seen yet
++          if (!plusMerge.same(plusMerge.normalize(remote.data), merged)) this.scheduleExport();
++        })
++        .catch((e) => console.log('Lampac Storage', 'import', 'error', e && e.message))
++        .then(() => {
+           if (typeof callback === 'function') callback();
++        });
++    },
++
++    importSoon() {
++      if (Date.now() - this.lastImport < 3000) return;
++      this.goImport();
++    },
++
++    listenRemote() {
++      document.addEventListener('lwsEvent', (event) => {
++        const detail = event.detail || {};
++        if (detail.name === 'storage') {
++          let data = detail.data;
++          try { data = typeof data === 'string' ? JSON.parse(data) : data; } catch (e) { }
++          if (data && data.path === 'sync_favorite_plus') this.goImport();
++        } else if (detail.name === 'system' && detail.data === 'reconnected') {
++          this.importSoon();
+         }
+-      );
++      });
++
++      if (!window.lwsEvent) {
++        Lampa.Utils.putScript([this.account(window.location.origin + '/invc-ws.js')], () => { }, false, () => { }, true);
++      }
++
++      document.addEventListener('visibilitychange', () => {
++        if (!document.hidden) this.importSoon();
++      });
++
++      Lampa.Listener.follow('activity', (event) => {
++        if (event.type === 'start' && event.component === 'bookmarks') this.importSoon();
++      });
+     }
+   };
+ 
+@@ -507,13 +720,9 @@
+     if (window.favorite_plus) return;
+     window.favorite_plus = true;
+ 
+-    Lampa.Storage.listener.follow('change', (event) => {
+-      if (event.name === 'lampac_sync_favorite' && event.value == 0) {
+-        Lampa.Storage.set(STORAGE_KEY, '{}', true);
+-        Lampa.Storage.set(STORAGE_SYNC_KEY, 0, true);
+-        favoritePlus.init({});
+-      }
+-    });
++    // msbbol: lists are stored per account and shared by all profiles.js profiles.
++    // The original wiped them on profile switch and did not re-import until restart,
++    // so the next edit overwrote the shared server file almost empty. Do not wipe.
+ 
+     plusSync.init();
+ 
