@@ -1,0 +1,12 @@
+{
+  "enable": true,
+  "dynamic": true,
+  "references": [
+    "references/"
+  ],
+  "tree": [
+    "Models",
+    "Controllers",
+    "ModInit.cs"
+  ]
+}
