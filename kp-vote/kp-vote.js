@@ -1,7 +1,7 @@
 /*!
  * kp-vote.js — ваши оценки Кинопоиска в Lampa (msbbol).
  * В карточке: значок «Моя КП» с вашей оценкой и кнопка «Оценить» (1–10, удалить оценку).
- * При отметке «Просмотрено» в открытой карточке предлагает поставить оценку.
+ * Когда фильм или сериал отмечен просмотренным (кнопкой MyShows или «Просмотрено» Lampa), предлагает поставить оценку.
  * Оценки читаются и ставятся через сервис kp-vote на домашнем сервере (cookie Кинопоиска хранится там).
  * Работает только в основном профиле (profiles.js): оценки уходят в один аккаунт Кинопоиска.
  */
@@ -167,21 +167,99 @@
     });
   });
 
-  // ---------- оценка при отметке «Просмотрено» ----------
-  Lampa.Favorite.listener.follow('add,added', function (e) {
-    if (e.where !== 'viewed' || !mainProfile() || String(Lampa.Storage.get(ASK_KEY, true)) === 'false') return;
-    var active = Lampa.Activity.active();
-    if (!active || active.component !== 'full' || !e.card || !current || !current.card || current.card.id !== e.card.id) return;
+  // ---------- общий перехват: MyShows отметил фильм или сериал просмотренным ----------
+  // Плагин MyShows шлёт JSON-RPC manage.SetMovieStatus / manage.SetShowStatus со status "finished".
+  // При успешном ответе рассылаем Lampa.Listener 'msbbol_watched' {card, kind}; карточка — открытая (кнопка MyShows в ней).
+  function watchedHook() {
+    if (window.msbbol_watched_hook) return;
+    window.msbbol_watched_hook = true;
+    var RX = /"method"\s*:\s*"manage\.Set(Movie|Show)Status"/;
 
-    var state = current;
+    function inspect(body, onResponse) {
+      if (typeof body !== 'string' || !RX.test(body)) return;
+      var req;
+      try { req = JSON.parse(body); } catch (e) { return; }
+      if (!req || !req.params || req.params.status !== 'finished') return;
+      var kind = req.method === 'manage.SetShowStatus' ? 'tv' : 'movie';
+      var act = Lampa.Activity.active();
+      var card = act && act.component === 'full' ? (act.card || null) : null;
+      if (!card) return;
+      onResponse(function (text) {
+        var res;
+        try { res = JSON.parse(text); } catch (e) { return; }
+        if (res && res.result) Lampa.Listener.send('msbbol_watched', { card: card, kind: kind, source: 'myshows' });
+      });
+    }
+
+    var send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (body) {
+      var xhr = this;
+      try {
+        inspect(body, function (done) {
+          xhr.addEventListener('load', function () { if (xhr.status >= 200 && xhr.status < 300) done(xhr.responseText); });
+        });
+      } catch (e) {}
+      return send.apply(this, arguments);
+    };
+    if (window.fetch) {
+      var origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        var p = origFetch.apply(this, arguments);
+        try {
+          inspect(init && init.body, function (done) {
+            p.then(function (r) { if (r.ok) r.clone().text().then(done); }).catch(function () {});
+          });
+        } catch (e) {}
+        return p;
+      };
+    }
+  }
+
+  // одна и та же карточка может прийти и из «Просмотрено», и из MyShows — не дублируем
+  var recent = {};
+  function once(card) {
+    var key = (card.name || card.original_name ? 'tv:' : 'movie:') + card.id;
+    var now = Date.now();
+    if (recent[key] && now - recent[key] < 120000) return false;
+    recent[key] = now;
+    return true;
+  }
+
+  // ---------- оценка при отметке просмотренным (MyShows или «Просмотрено» Lampa) ----------
+  function playerOpened() {
+    return !!(Lampa.Player && Lampa.Player.opened && Lampa.Player.opened());
+  }
+
+  function askFor(card) {
+    if (!card || !mainProfile() || String(Lampa.Storage.get(ASK_KEY, true)) === 'false' || !once(card)) return;
+    var state = current && current.card && current.card.id === card.id ? current : { card: card, render: null, kp: null, value: null };
     var ready = state.kp ? Promise.resolve(state.kp) : kpId(state.card).then(function (kp) { state.kp = kp; return kp; });
     ready.then(function (kp) {
-      if (!kp || state.value) return;
-      setTimeout(function () {
-        var controller = Lampa.Controller.enabled().name;
-        choose(state, function () { Lampa.Controller.toggle(controller); }, 'Оцените «' + cardTitle(state.card) + '»');
-      }, 300);
-    });
+      if (!kp) return;
+      return (state.value ? Promise.resolve(state.value) : getVote(kp)).then(function (value) {
+        state.value = value;
+        if (value) return; // оценка уже стоит
+        var show = function () {
+          var controller = Lampa.Controller.enabled().name;
+          choose(state, function () { Lampa.Controller.toggle(controller); }, 'Оцените «' + cardTitle(state.card) + '»');
+        };
+        if (playerOpened()) {
+          // MyShows отмечает просмотр и во время воспроизведения — спросим, когда плеер закроется
+          var wait = function (e) {
+            if (e.type !== 'destroy') return;
+            Lampa.Player.listener.remove('destroy', wait);
+            setTimeout(show, 600);
+          };
+          Lampa.Player.listener.follow('destroy', wait);
+        } else setTimeout(show, 300);
+      });
+    }).catch(function (err) { console.log('kp-vote', err.message); });
+  }
+
+  watchedHook();
+  Lampa.Listener.follow('msbbol_watched', function (e) { askFor(e.card); });
+  Lampa.Favorite.listener.follow('add', function (e) {
+    if (e.where === 'viewed') askFor(e.card);
   });
 
   // ---------- настройки ----------
@@ -211,7 +289,7 @@
     Lampa.SettingsApi.addParam({
       component: 'kp_vote',
       param: { name: ASK_KEY, type: 'trigger', default: true },
-      field: { name: 'Спрашивать оценку', description: 'Когда отмечаете фильм или сериал как «Просмотрено» в его карточке' }
+      field: { name: 'Спрашивать оценку', description: 'Когда фильм или сериал отмечен просмотренным в MyShows или «Просмотрено» Lampa' }
     });
     Lampa.SettingsApi.addParam({
       component: 'kp_vote',
