@@ -7,6 +7,7 @@
 | [`fav-sort.js`](#сортировка-закладок--fav-sortjs) | Сортировка и фильтры закладок, рейтинг Кинопоиска на постерах |
 | [`card-size.js`](#размер-карточек--card-sizejs) | Размер карточек и масштаб интерфейса на больших мониторах |
 | [`kp-vote`](kp-vote/) | Ваши оценки Кинопоиска в карточке и оценка 1–10 прямо из Lampa |
+| [`fx-sync`](fx-sync/) | Просмотренное — в плейлисты Filmix «Просмотрено» и «Просмотрено. Сериалы», с удалением из закладок Filmix |
 | [`favorite-plus`](favorite-plus/) | Патч Favorite Plus: общие списки для всех профилей без потери правок |
 | [`lampac`](lampac/) | Раздел «Дорамы» (корейские, китайские, японские), очистка старых плагинов с устройств, уведомления о сериях в Telegram, сборка Android-приложения |
 | [`myshows-auth-proxy`](myshows-auth-proxy/) | Свой прокси входа для плагина MyShows |
@@ -142,9 +143,13 @@ https://msbbol.github.io/lampa-plugins/card-size.js
 
 ## Оценки Кинопоиска — `kp-vote`
 
-Значок «Моя КП» с вашей оценкой в карточке фильма и кнопка «Оценить» (1–10): оценка сразу уходит в ваш аккаунт Кинопоиска. Нужен небольшой сервис на своём сервере. Подробно — в [`kp-vote/`](kp-vote/).
+Значок «Моя КП» с вашей оценкой в карточке фильма и кнопка «Оценить» (1–10): оценка сразу уходит в ваш аккаунт Кинопоиска. Когда вы отмечаете фильм просмотренным в MyShows, Lampa сама предложит его оценить. Нужен небольшой сервис на своём сервере. Подробно — в [`kp-vote/`](kp-vote/).
 
 ![Оценка Кинопоиска в карточке](screenshots/kp-vote-card.jpg)
+
+## Просмотренное — в Filmix — `fx-sync`
+
+Отметили фильм или сериал просмотренным (кнопкой MyShows в карточке) — фильм попадает в плейлист Filmix «Просмотрено», сериал — в «Просмотрено. Сериалы», и тайтл убирается из закладок Filmix. Нужен небольшой сервис на своём сервере, cookie Filmix хранится только там. Подробно — в [`fx-sync/`](fx-sync/).
 
 ## Общие списки — патч Favorite Plus
 
@@ -157,6 +162,33 @@ https://msbbol.github.io/lampa-plugins/card-size.js
 ![Раздел «Дорамы»](screenshots/dorama.jpg)
 
 <sub>Постеры на скриншотах размыты.</sub>
+
+## Как всё подключено у меня
+
+Все плагины раздаются клиентам через `init.conf` Lampac, поэтому на новом устройстве ничего не нужно ставить вручную: достаточно войти в аккаунт Lampac. Сервисы `kp-vote`, `fx-sync` и `myshows-auth-proxy` работают в том же контейнере, что и Lampac (systemd), `kp-ratings.py` — по cron.
+
+```json
+"LampaWeb": {
+  "customPlugins": [
+    { "name": "Сортировка закладок", "url": "{localhost}/fav-sort.js", "status": 1 },
+    { "name": "MyShows", "url": "{localhost}/myshows/myshows.js?auth_proxy=http://<сервер>:9120/auth", "status": 1 },
+    { "name": "Favorite Plus", "url": "{localhost}/favoritePlus.js", "status": 1 },
+    { "name": "Размер карточек", "url": "https://msbbol.github.io/lampa-plugins/card-size.js", "status": 1 },
+    { "name": "Уведомления о сериях", "url": "{localhost}/tg-notify.js", "status": 1 },
+    { "name": "Профили", "url": "https://levende.github.io/lampa-plugins/profiles.js", "status": 1 },
+    { "name": "Оценки Кинопоиска", "url": "http://<сервер>:9121/kp-vote.js", "status": 1 },
+    { "name": "Filmix: просмотренное", "url": "http://<сервер>:9122/fx-sync.js", "status": 1 }
+  ]
+}
+```
+
+| Сервис | Порт | Где лежит |
+|---|---|---|
+| Lampac NextGen | 9118 | Docker, [`lampac/`](lampac/) |
+| `myshows-auth-proxy` | 9120 | [`myshows-auth-proxy/`](myshows-auth-proxy/) |
+| `kp-vote` | 9121 | [`kp-vote/`](kp-vote/) |
+| `fx-sync` | 9122 | [`fx-sync/`](fx-sync/) |
+| `kp-ratings.py` | — (cron, раз в час) | [`kp-ratings.py`](kp-ratings.py) |
 
 ## Лицензия
 
