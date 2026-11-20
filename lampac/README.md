@@ -45,6 +45,8 @@ Lampac сам добавляет плагины из `customPlugins` на все
       - ./module-overrides/SeriesNotify/manifest.json:/lampac/module/SeriesNotify/manifest.json:ro
 ```
 
+Сам файл — [`module-overrides/SeriesNotify/manifest.json`](module-overrides/SeriesNotify/manifest.json):
+
 ```json
 {"enable": true, "dynamic": true, "references": ["references/"], "tree": ["Models", "Controllers", "ModInit.cs"]}
 ```
